@@ -1,10 +1,17 @@
+/**
+ * Backwards-compatible synchronous refresh. The manual refresh path now runs
+ * through the durable refresh-task pipeline: it submits (or attaches to) the
+ * feed's active task, waits for the terminal state and maps it to the result
+ * shape the original RefreshService returned. Callers keep their contract
+ * while gaining crash recovery and cross-request deduplication.
+ */
 export class RefreshService {
-  constructor({ feeds, fetches, fetcher, imports, clock = () => new Date() }) {
+  constructor({ feeds, fetches, captures, articles, tasks }) {
     this.feeds = feeds;
     this.fetches = fetches;
-    this.fetcher = fetcher;
-    this.imports = imports;
-    this.clock = clock;
+    this.captures = captures;
+    this.articles = articles;
+    this.tasks = tasks;
     this.inFlight = new Map();
   }
 
@@ -21,37 +28,48 @@ export class RefreshService {
   async perform(feedId) {
     const feed = this.feeds.get(feedId);
     if (!feed) throw new Error(`unknown feed: ${feedId}`);
-    const startedAt = this.clock().toISOString();
-    try {
-      const fetched = await this.fetcher.fetchFeed(feed);
-      const finishedAt = this.clock().toISOString();
-      if (fetched.status === 304) {
-        const attemptId = this.fetches.record({
-          feedId, startedAt, finishedAt, outcome: "not_modified", httpStatus: 304,
-          attemptCount: fetched.attemptCount, requestedUrl: fetched.requestedUrl,
-          finalUrl: fetched.finalUrl, captureId: null, errorCode: null, errorMessage: null
-        });
-        return { attemptId, feedId, outcome: "not_modified", httpStatus: 304, capture: null };
-      }
-      const capture = this.imports.importHtml(feedId, fetched.html, finishedAt);
-      const attemptId = this.fetches.record({
-        feedId, startedAt, finishedAt, outcome: capture.accepted ? "accepted" : "rejected",
-        httpStatus: fetched.status, attemptCount: fetched.attemptCount,
-        requestedUrl: fetched.requestedUrl, finalUrl: fetched.finalUrl,
-        captureId: capture.captureId ?? null, errorCode: capture.accepted ? null : "capture_rejected",
-        errorMessage: capture.reason
+    const { task } = this.tasks.submit(feedId, {});
+    const terminal = await this.tasks.awaitTask(task.taskId);
+    return this.toLegacyResult(terminal);
+  }
+
+  toLegacyResult(task) {
+    if (task.status === "failed") {
+      throw Object.assign(new Error(task.errorMessage ?? "refresh failed"), {
+        code: task.errorCode,
+        status: task.httpStatus ?? undefined,
+        attemptCount: task.attemptCount ?? undefined,
+        attemptId: task.attemptId,
+        statusCode: 502
       });
-      return { attemptId, feedId, outcome: capture.accepted ? "accepted" : "rejected",
-        httpStatus: fetched.status, capture };
-    } catch (error) {
-      const finishedAt = this.clock().toISOString();
-      const attemptId = this.fetches.record({
-        feedId, startedAt, finishedAt, outcome: "failed", httpStatus: error.status ?? null,
-        attemptCount: error.attemptCount ?? 1, requestedUrl: feed.baseUrl, finalUrl: null,
-        captureId: null, errorCode: error.code ?? "refresh_failed", errorMessage: error.message.slice(0, 500)
-      });
-      throw Object.assign(error, { attemptId, statusCode: error.statusCode ?? 502 });
     }
+    if (task.outcome === "not_modified") {
+      return { attemptId: task.attemptId, feedId: task.feedId, outcome: "not_modified", httpStatus: 304, capture: null };
+    }
+    const stored = task.captureId != null ? this.captures.get(task.captureId) : null;
+    const assessment = task.assessment ?? {};
+    const capture = {
+      captureId: task.captureId,
+      feedId: task.feedId,
+      fingerprint: stored?.fingerprint ?? assessment.fingerprint ?? null,
+      capturedAt: stored?.capturedAt ?? assessment.capturedAt ?? null,
+      accepted: task.outcome === "accepted",
+      replay: Boolean(task.captureReplay),
+      candidateCount: stored?.candidateCount ?? assessment.candidateCount ?? null,
+      normalizedCount: stored?.normalizedCount ?? assessment.normalizedCount ?? null,
+      rejectedCount: stored?.rejectedCount ?? assessment.rejectedCount ?? null,
+      duplicateCount: stored?.duplicateCount ?? assessment.duplicateCount ?? null,
+      reason: stored?.reason ?? assessment.reason ?? null,
+      rejected: assessment.rejected ?? [],
+      stats: this.articles.stats(task.feedId)
+    };
+    return {
+      attemptId: task.attemptId,
+      feedId: task.feedId,
+      outcome: task.outcome,
+      httpStatus: task.httpStatus,
+      capture
+    };
   }
 
   recent(feedId, limit) {
@@ -60,6 +78,6 @@ export class RefreshService {
   }
 
   pending(feedId) {
-    return this.inFlight.has(feedId);
+    return this.inFlight.has(feedId) || this.tasks.activeForFeed(feedId) != null;
   }
 }

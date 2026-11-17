@@ -59,6 +59,31 @@ async function routeRequest(request, response, archive) {
     const status = result.outcome === "accepted" ? result.capture.replay ? 200 : 202 : result.outcome === "not_modified" ? 200 : 422;
     return writeJson(response, status, result);
   }
+  if (segments.length === 4 && segments[3] === "refresh-tasks" && request.method === "POST") {
+    if (!archive.feedStatus(feedId)) return notFound(response);
+    const text = await readText(request);
+    let input = {};
+    if (text.trim()) {
+      try {
+        input = JSON.parse(text);
+      } catch {
+        throw new TypeError("request body must be valid JSON");
+      }
+    }
+    const taskKey = input.taskKey ?? request.headers["idempotency-key"] ?? null;
+    const { task, deduplicated } = archive.submitRefreshTask(feedId, { taskKey });
+    return writeJson(response, deduplicated ? 200 : 202, { task, deduplicated });
+  }
+  if (segments.length === 4 && segments[3] === "refresh-tasks" && request.method === "GET") {
+    const result = archive.listRefreshTasks(feedId, url.searchParams.get("limit"));
+    return result ? writeJson(response, 200, { tasks: result }) : notFound(response);
+  }
+  if (segments.length === 5 && segments[3] === "refresh-tasks" && request.method === "GET") {
+    const taskId = Number(segments[4]);
+    if (!Number.isInteger(taskId) || taskId < 1) throw new TypeError("taskId must be a positive integer");
+    const task = archive.getRefreshTask(feedId, taskId);
+    return task ? writeJson(response, 200, { task }) : notFound(response);
+  }
   if (segments.length === 3 && request.method === "GET") {
     const result = archive.feedStatus(feedId);
     return result ? writeJson(response, 200, result) : notFound(response);

@@ -16,6 +16,11 @@ export class IntegrityAuditService {
       FROM feeds f LEFT JOIN captures c ON c.capture_id=(
         SELECT capture_id FROM captures WHERE feed_id=f.feed_id AND accepted=1 ORDER BY capture_id DESC LIMIT 1
       ) WHERE (f.last_accepted_at IS NOT c.captured_at) OR (f.last_item_count != COALESCE(c.normalized_count, 0))`);
+    this.taskLinkMismatches = database.prepare(`SELECT task_id, status, stage, outcome, capture_id, attempt_id
+      FROM refresh_tasks
+      WHERE (status='completed' AND outcome IN ('accepted', 'rejected') AND (capture_id IS NULL OR attempt_id IS NULL))
+        OR (status='completed' AND outcome='not_modified' AND attempt_id IS NULL)
+        OR (status='failed' AND attempt_id IS NULL)`);
   }
 
   run() {
@@ -24,7 +29,8 @@ export class IntegrityAuditService {
       { name: "foreign_keys", rows: this.foreignKeyCheck.all() },
       { name: "capture_item_counts", rows: this.captureLinkMismatches.all() },
       { name: "article_observation_counts", rows: this.articleCountMismatches.all() },
-      { name: "feed_watermarks", rows: this.feedWatermarkMismatches.all() }
+      { name: "feed_watermarks", rows: this.feedWatermarkMismatches.all() },
+      { name: "refresh_task_links", rows: this.taskLinkMismatches.all() }
     ].map((check) => ({
       name: check.name,
       passed: check.rows.length === 0,

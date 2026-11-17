@@ -3,10 +3,10 @@ export class FetchRepository {
     this.database = database;
     this.insert = database.prepare(`INSERT INTO fetch_attempts
       (feed_id, started_at, finished_at, outcome, http_status, attempt_count, requested_url,
-       final_url, capture_id, error_code, error_message)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`);
+       final_url, capture_id, error_code, error_message, task_id)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`);
     this.listQuery = database.prepare(`SELECT attempt_id, feed_id, started_at, finished_at, outcome,
-      http_status, attempt_count, requested_url, final_url, capture_id, error_code, error_message
+      http_status, attempt_count, requested_url, final_url, capture_id, error_code, error_message, task_id
       FROM fetch_attempts WHERE feed_id=? ORDER BY attempt_id DESC LIMIT ?`);
     this.summaryQuery = database.prepare(`SELECT COUNT(*) AS total,
       SUM(CASE WHEN outcome='accepted' THEN 1 ELSE 0 END) AS accepted,
@@ -21,7 +21,7 @@ export class FetchRepository {
   record(attempt) {
     const result = this.insert.run(attempt.feedId, attempt.startedAt, attempt.finishedAt, attempt.outcome,
       attempt.httpStatus, attempt.attemptCount, attempt.requestedUrl, attempt.finalUrl,
-      attempt.captureId, attempt.errorCode, attempt.errorMessage);
+      attempt.captureId, attempt.errorCode, attempt.errorMessage, attempt.taskId ?? null);
     return Number(result.lastInsertRowid);
   }
 
@@ -57,6 +57,7 @@ function mapAttempt(row) {
     finalUrl: row.final_url,
     captureId: row.capture_id,
     errorCode: row.error_code,
-    errorMessage: row.error_message
+    errorMessage: row.error_message,
+    taskId: row.task_id ?? null
   };
 }
